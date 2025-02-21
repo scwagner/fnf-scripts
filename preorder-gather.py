@@ -23,7 +23,7 @@ SQUARE_API_BASE_URL = 'https://connect.squareup.com/v2'
 
 # Configure headers for all requests
 headers = {
-    'Square-Version': '2024-01-18',  # Current API version
+    'Square-Version': '2025-02-20',  # Current API version
     'Authorization': f'Bearer {SQUARE_API_KEY}',
     'Content-Type': 'application/json'
 }
@@ -32,12 +32,13 @@ headers = {
 SQUARE_LOCATION_ID = "L0ZE9C5Y6J1B9"
 
 # Add these near the top with other globals
-ITEM_QUANTITIES = {}
+ITEM_QUANTITIES = {}  # Will store {catalog_id: {'name': item_name, 'quantity': count}}
 ORDER_STATUS_COUNTS = {
     'NOT_FULFILLED': 0,
     'PICKED_UP': 0,
     'COMPLETED': 0,
-    'NO_FULFILLMENT': 0
+    'NO_FULFILLMENT': 0,
+    'STILL_SHOPPING': 0
 }
 
 def setup_google_sheets():
@@ -107,11 +108,13 @@ def search_orders(start_date_str):
                     "created_at": {
                         "start_at": start_date_utc
                     }
-                }
+                },
+                "states": ["OPEN"],
             }
         },
         "location_ids": [SQUARE_LOCATION_ID]
     }
+    print(payload)
 
     response = requests.post(endpoint, headers=headers, json=payload)
     response.raise_for_status()  # Raise exception for non-200 status codes
@@ -136,6 +139,22 @@ def process_order(order, sheets_client):
         status = fulfillment.get('state', '')
         order_id = order.get('id', 'N/A')
         created_at = order.get('created_at', 'N/A')
+        amount_due = order.get('net_amount_due_money', {}).get('amount', 0)
+        if amount_due > 0:
+            ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
+            line_items = order.get('line_items', [])
+            for item in line_items:
+                quantity = int(float(item.get('quantity', 0)))
+                if item.get('catalog_object_id') in ITEM_QUANTITIES:
+                    ITEM_QUANTITIES[item.get('catalog_object_id')]['qty_in_carts'] += quantity
+                else:
+                    ITEM_QUANTITIES[item.get('catalog_object_id')] = {
+                        'name': item.get('name', 'Unknown Item'),
+                        'quantity': 0,
+                        'qty_in_carts': quantity
+                    }
+            print(f"Skipping order {order_id}: Still Shopping ({amount_due} in cart)")
+            return False
 
         # Update status counts and process line items only for open orders
         if status in ['COMPLETED', 'PICKED_UP']:
@@ -149,25 +168,41 @@ def process_order(order, sheets_client):
             for item in line_items:
                 catalog_object_id = item.get('catalog_object_id')
                 quantity = int(float(item.get('quantity', 0)))
+                name = item.get('name', 'Unknown Item')
 
                 if catalog_object_id:
-                    ITEM_QUANTITIES[catalog_object_id] = ITEM_QUANTITIES.get(catalog_object_id, 0) + quantity
+                    if catalog_object_id not in ITEM_QUANTITIES:
+                        ITEM_QUANTITIES[catalog_object_id] = {
+                            'name': name,
+                            'quantity': quantity,
+                            'qty_in_carts': 0,
+                        }
+                    else:
+                        ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
 
         # Extract customer info from fulfillments
         pickup_details = fulfillment.get('pickup_details', {})
         recipient = pickup_details.get('recipient', {})
+        if len(recipient) == 0:
+            recipient = fulfillment.get('shipment_details', {}).get('recipient', {})
         customer_info = {
             'name': f"{recipient.get('display_name', 'N/A')}",
             'phone': recipient.get('phone_number', 'N/A'),
             'email': recipient.get('email_address', 'N/A'),
             'pickup_at': pickup_details.get('pickup_at', 'N/A')
         }
+        print(order)
+
 
         print(f"Processing Order: {order_id}")
         print(f"Created: {created_at}")
         print(f"Status: {status}")
         print(f"Customer: {customer_info}")
-        print(f"Items: {len(line_items)}")
+        print(f"Items ({len(line_items)}):")
+        for item in line_items:
+            name = item.get('name', 'Unknown Item')
+            quantity = int(float(item.get('quantity', 0)))
+            print(f"    {quantity}x {name}")
 
     except Exception as e:
         print(f"Error processing order {order.get('id', 'unknown')}: {e}")
@@ -198,11 +233,12 @@ def main():
             print(f"Picked Up: {ORDER_STATUS_COUNTS['PICKED_UP']}")
             print(f"Completed/Shipped: {ORDER_STATUS_COUNTS['COMPLETED']}")
             print(f"No Fulfillment Info: {ORDER_STATUS_COUNTS['NO_FULFILLMENT']}")
+            print(f"Still Shopping: {ORDER_STATUS_COUNTS['STILL_SHOPPING']}")
             print(f"\nSuccessfully processed {successful_orders} out of {len(orders)} orders")
 
             print("\nItem Quantities:")
-            for item_id, quantity in ITEM_QUANTITIES.items():
-                print(f"Item {item_id}: {quantity}")
+            for item_id, item_data in ITEM_QUANTITIES.items():
+                print(f"{item_data['name']} (ID: {item_id}): {item_data['quantity']} in carts: {item_data['qty_in_carts']}")
         else:
             print("No orders found")
 
