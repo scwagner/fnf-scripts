@@ -120,92 +120,131 @@ def search_orders(start_date_str):
     response.raise_for_status()  # Raise exception for non-200 status codes
     return response.json()
 
-def process_order(order, sheets_client):
-    """
-    Process an individual order and update Google Sheets
-    Args:
-        order: Dictionary containing order information from Square API
-        sheets_client: Authorized Google Sheets client
-    """
-    try:
-        # Check fulfillment status first
-        fulfillments = order.get('fulfillments', [])
-        if not fulfillments:
-            ORDER_STATUS_COUNTS['NO_FULFILLMENT'] += 1
-            print(f"Skipping order {order.get('id')}: No fulfillment information")
-            return False
+class Order:
+    def __init__(self, order_data):
+        self.order_data = order_data
+        self.fulfillment = self._get_first_fulfillment()
 
-        fulfillment = fulfillments[0]
-        status = fulfillment.get('state', '')
-        order_id = order.get('id', 'N/A')
-        created_at = order.get('created_at', 'N/A')
-        amount_due = order.get('net_amount_due_money', {}).get('amount', 0)
-        if amount_due > 0:
-            ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
-            line_items = order.get('line_items', [])
-            for item in line_items:
-                quantity = int(float(item.get('quantity', 0)))
-                if item.get('catalog_object_id') in ITEM_QUANTITIES:
-                    ITEM_QUANTITIES[item.get('catalog_object_id')]['qty_in_carts'] += quantity
-                else:
-                    ITEM_QUANTITIES[item.get('catalog_object_id')] = {
-                        'name': item.get('name', 'Unknown Item'),
-                        'quantity': 0,
-                        'qty_in_carts': quantity
-                    }
-            print(f"Skipping order {order_id}: Still Shopping ({amount_due} in cart)")
-            return False
+    def _get_first_fulfillment(self):
+        """Get the first fulfillment if any exist"""
+        fulfillments = self.order_data.get('fulfillments', [])
+        return fulfillments[0] if fulfillments else None
 
-        # Update status counts and process line items only for open orders
-        if status in ['COMPLETED', 'PICKED_UP']:
-            ORDER_STATUS_COUNTS[status] += 1
-            print(f"Skipping order {order_id}: Already {status}")
-            return False
-        else:
-            ORDER_STATUS_COUNTS['NOT_FULFILLED'] += 1
-            # Only process line items for not fulfilled orders
-            line_items = order.get('line_items', [])
-            for item in line_items:
-                catalog_object_id = item.get('catalog_object_id')
-                quantity = int(float(item.get('quantity', 0)))
-                name = item.get('name', 'Unknown Item')
+    def get_order_id(self):
+        return self.order_data.get('id', 'N/A')
 
-                if catalog_object_id:
-                    if catalog_object_id not in ITEM_QUANTITIES:
-                        ITEM_QUANTITIES[catalog_object_id] = {
-                            'name': name,
-                            'quantity': quantity,
-                            'qty_in_carts': 0,
-                        }
-                    else:
-                        ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
+    def get_created_at(self):
+        return self.order_data.get('created_at', 'N/A')
 
-        # Extract customer info from fulfillments
-        pickup_details = fulfillment.get('pickup_details', {})
+    def get_amount_due(self):
+        return self.order_data.get('net_amount_due_money', {}).get('amount', 0)
+
+    def get_fulfillment_status(self):
+        if not self.fulfillment:
+            return 'NO_FULFILLMENT'
+        return self.fulfillment.get('state', '')
+
+    def get_line_items(self):
+        return self.order_data.get('line_items', [])
+
+    def get_customer_info(self):
+        if not self.fulfillment:
+            return {
+                'name': 'N/A',
+                'phone': 'N/A',
+                'email': 'N/A',
+                'pickup_at': 'N/A'
+            }
+
+        pickup_details = self.fulfillment.get('pickup_details', {})
         recipient = pickup_details.get('recipient', {})
-        if len(recipient) == 0:
-            recipient = fulfillment.get('shipment_details', {}).get('recipient', {})
-        customer_info = {
-            'name': f"{recipient.get('display_name', 'N/A')}",
+        if not recipient:
+            recipient = self.fulfillment.get('shipment_details', {}).get('recipient', {})
+
+        return {
+            'name': recipient.get('display_name', 'N/A'),
             'phone': recipient.get('phone_number', 'N/A'),
             'email': recipient.get('email_address', 'N/A'),
             'pickup_at': pickup_details.get('pickup_at', 'N/A')
         }
-        print(order)
 
+    def is_still_shopping(self):
+        return self.get_amount_due() > 0
 
-        print(f"Processing Order: {order_id}")
-        print(f"Created: {created_at}")
-        print(f"Status: {status}")
+    def is_completed_or_picked_up(self):
+        status = self.get_fulfillment_status()
+        return status in ['COMPLETED', 'PICKED_UP']
+
+def process_order(order, sheets_client):
+    """
+    Process an individual order and update Google Sheets
+    Args:
+        order: Order object containing order information
+        sheets_client: Authorized Google Sheets client
+    """
+    try:
+        # Check fulfillment status first
+        if not order.fulfillment:
+            ORDER_STATUS_COUNTS['NO_FULFILLMENT'] += 1
+            print(f"Skipping order {order.get_order_id()}: No fulfillment information")
+            return False
+
+        if order.is_still_shopping():
+            ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
+            line_items = order.get_line_items()
+            for item in line_items:
+                quantity = int(float(item.get('quantity', 0)))
+                catalog_id = item.get('catalog_object_id')
+                if catalog_id in ITEM_QUANTITIES:
+                    ITEM_QUANTITIES[catalog_id]['qty_in_carts'] += quantity
+                else:
+                    ITEM_QUANTITIES[catalog_id] = {
+                        'name': item.get('name', 'Unknown Item'),
+                        'quantity': 0,
+                        'qty_in_carts': quantity
+                    }
+            print(f"Skipping order {order.get_order_id()}: Still Shopping ({order.get_amount_due()} in cart)")
+            return False
+
+        # Update status counts and process line items only for open orders
+        if order.is_completed_or_picked_up():
+            status = order.get_fulfillment_status()
+            ORDER_STATUS_COUNTS[status] += 1
+            print(f"Skipping order {order.get_order_id()}: Already {status}")
+            return False
+
+        ORDER_STATUS_COUNTS['NOT_FULFILLED'] += 1
+        # Process line items for not fulfilled orders
+        for item in order.get_line_items():
+            catalog_object_id = item.get('catalog_object_id')
+            quantity = int(float(item.get('quantity', 0)))
+            name = item.get('name', 'Unknown Item')
+
+            if catalog_object_id:
+                if catalog_object_id not in ITEM_QUANTITIES:
+                    ITEM_QUANTITIES[catalog_object_id] = {
+                        'name': name,
+                        'quantity': quantity,
+                        'qty_in_carts': 0,
+                    }
+                else:
+                    ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
+
+        customer_info = order.get_customer_info()
+
+        print(order.order_data)
+        print(f"Processing Order: {order.get_order_id()}")
+        print(f"Created: {order.get_created_at()}")
+        print(f"Status: {order.get_fulfillment_status()}")
         print(f"Customer: {customer_info}")
-        print(f"Items ({len(line_items)}):")
-        for item in line_items:
+        print(f"Items ({len(order.get_line_items())}):")
+        for item in order.get_line_items():
             name = item.get('name', 'Unknown Item')
             quantity = int(float(item.get('quantity', 0)))
             print(f"    {quantity}x {name}")
 
     except Exception as e:
-        print(f"Error processing order {order.get('id', 'unknown')}: {e}")
+        print(f"Error processing order {order.get_order_id()}: {e}")
         return False
 
     return True
@@ -215,18 +254,13 @@ def main():
     sheets_client = setup_google_sheets()
 
     try:
-        # Search for orders
         orders_response = search_orders(args.start_date)
 
         if 'orders' in orders_response:
-            orders = orders_response['orders']
+            orders = [Order(order_data) for order_data in orders_response['orders']]
             print(f"Found {len(orders)} orders")
 
-            # Process each order individually
-            successful_orders = 0
-            for order in orders:
-                if process_order(order, sheets_client):
-                    successful_orders += 1
+            successful_orders = sum(1 for order in orders if process_order(order, sheets_client))
 
             print("\nOrder Status Summary:")
             print(f"Not Fulfilled: {ORDER_STATUS_COUNTS['NOT_FULFILLED']}")
