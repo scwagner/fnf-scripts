@@ -38,7 +38,8 @@ ORDER_STATUS_COUNTS = {
     'PICKED_UP': 0,
     'COMPLETED': 0,
     'NO_FULFILLMENT': 0,
-    'STILL_SHOPPING': 0
+    'STILL_SHOPPING': 0,
+    'CANCELED': 0
 }
 
 def setup_google_sheets():
@@ -168,12 +169,30 @@ class Order:
             'pickup_at': pickup_details.get('pickup_at', 'N/A')
         }
 
+    def get_state(self):
+        return self.order_data.get('state', '')
+
+    def is_cancelled(self):
+        return self.get_state() == 'CANCELED'
+
     def is_still_shopping(self):
-        return self.get_amount_due() > 0
+        return self.get_amount_due() > 0 or self.get_state() == 'DRAFT'
 
     def is_completed_or_picked_up(self):
         status = self.get_fulfillment_status()
         return status in ['COMPLETED', 'PICKED_UP']
+
+
+class OrderItem:
+    def __init__(self, item_data):
+        self.item_data = item_data
+
+    def get_name(self):
+        variation = self.item_data.get('variation_name', '')
+        if variation not in ['Regular', '']:
+            return f"{self.item_data.get('name')} ({variation})"
+        return self.item_data.get('name', '')
+
 
 def process_order(order, sheets_client):
     """
@@ -193,13 +212,14 @@ def process_order(order, sheets_client):
             ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
             line_items = order.get_line_items()
             for item in line_items:
+                order_item = OrderItem(item)
                 quantity = int(float(item.get('quantity', 0)))
                 catalog_id = item.get('catalog_object_id')
                 if catalog_id in ITEM_QUANTITIES:
                     ITEM_QUANTITIES[catalog_id]['qty_in_carts'] += quantity
                 else:
                     ITEM_QUANTITIES[catalog_id] = {
-                        'name': item.get('name', 'Unknown Item'),
+                        'name': order_item.get_name(),
                         'quantity': 0,
                         'qty_in_carts': quantity
                     }
@@ -213,17 +233,22 @@ def process_order(order, sheets_client):
             print(f"Skipping order {order.get_order_id()}: Already {status}")
             return False
 
+        if order.is_cancelled():
+            ORDER_STATUS_COUNTS['CANCELED'] += 1
+            print(f"Skipping order {order.get_order_id()}: Already CANCELED")
+            return False
+
         ORDER_STATUS_COUNTS['NOT_FULFILLED'] += 1
         # Process line items for not fulfilled orders
         for item in order.get_line_items():
+            order_item = OrderItem(item)
             catalog_object_id = item.get('catalog_object_id')
             quantity = int(float(item.get('quantity', 0)))
-            name = item.get('name', 'Unknown Item')
 
             if catalog_object_id:
                 if catalog_object_id not in ITEM_QUANTITIES:
                     ITEM_QUANTITIES[catalog_object_id] = {
-                        'name': name,
+                        'name': order_item.get_name(),
                         'quantity': quantity,
                         'qty_in_carts': 0,
                     }
@@ -268,6 +293,7 @@ def main():
             print(f"Completed/Shipped: {ORDER_STATUS_COUNTS['COMPLETED']}")
             print(f"No Fulfillment Info: {ORDER_STATUS_COUNTS['NO_FULFILLMENT']}")
             print(f"Still Shopping: {ORDER_STATUS_COUNTS['STILL_SHOPPING']}")
+            print(f"Cancelled: {ORDER_STATUS_COUNTS['CANCELED']}")
             print(f"\nSuccessfully processed {successful_orders} out of {len(orders)} orders")
 
             print("\nItem Quantities:")
