@@ -5,6 +5,11 @@ import sys
 import argparse
 import gspread
 from google.oauth2.service_account import Credentials
+from dotenv import load_dotenv
+
+# Load environment variables from .creds/.env
+env_path = os.path.join(os.path.dirname(__file__), '.creds', '.env')
+load_dotenv(env_path)
 
 # Get Square API key from environment variable
 SQUARE_API_KEY = os.getenv('SQUARE_API_KEY')
@@ -41,18 +46,18 @@ def setup_google_sheets():
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
-    
+
     try:
         # Look for JSON files in .creds directory
         creds_dir = os.path.join(os.path.dirname(__file__), '.creds')
         json_files = [f for f in os.listdir(creds_dir) if f.endswith('.json')]
-        
+
         if not json_files:
             raise FileNotFoundError("No JSON credential files found in .creds directory")
-        
+
         # Use the first JSON file found
         creds_path = os.path.join(creds_dir, json_files[0])
-        
+
         # Load credentials from service account file
         creds = Credentials.from_service_account_file(
             creds_path,
@@ -73,14 +78,14 @@ def parse_args():
         help='Start date for order search (YYYY-MM-DD format)'
     )
     args = parser.parse_args()
-    
+
     # Validate date format
     try:
         datetime.strptime(args.start_date, '%Y-%m-%d')
     except ValueError:
         print("Error: Date must be in YYYY-MM-DD format")
         sys.exit(1)
-        
+
     return args
 
 def search_orders(start_date_str):
@@ -94,7 +99,7 @@ def search_orders(start_date_str):
     start_date_utc = start_date.replace(tzinfo=timezone.utc).isoformat()
 
     endpoint = f"{SQUARE_API_BASE_URL}/orders/search"
-    
+
     payload = {
         "query": {
             "filter": {
@@ -126,12 +131,12 @@ def process_order(order, sheets_client):
             ORDER_STATUS_COUNTS['NO_FULFILLMENT'] += 1
             print(f"Skipping order {order.get('id')}: No fulfillment information")
             return False
-            
+
         fulfillment = fulfillments[0]
         status = fulfillment.get('state', '')
         order_id = order.get('id', 'N/A')
         created_at = order.get('created_at', 'N/A')
-        
+
         # Update status counts and process line items only for open orders
         if status in ['COMPLETED', 'PICKED_UP']:
             ORDER_STATUS_COUNTS[status] += 1
@@ -144,10 +149,10 @@ def process_order(order, sheets_client):
             for item in line_items:
                 catalog_object_id = item.get('catalog_object_id')
                 quantity = int(float(item.get('quantity', 0)))
-                
+
                 if catalog_object_id:
                     ITEM_QUANTITIES[catalog_object_id] = ITEM_QUANTITIES.get(catalog_object_id, 0) + quantity
-        
+
         # Extract customer info from fulfillments
         pickup_details = fulfillment.get('pickup_details', {})
         recipient = pickup_details.get('recipient', {})
@@ -157,50 +162,50 @@ def process_order(order, sheets_client):
             'email': recipient.get('email_address', 'N/A'),
             'pickup_at': pickup_details.get('pickup_at', 'N/A')
         }
-        
+
         print(f"Processing Order: {order_id}")
         print(f"Created: {created_at}")
         print(f"Status: {status}")
         print(f"Customer: {customer_info}")
         print(f"Items: {len(line_items)}")
-        
+
     except Exception as e:
         print(f"Error processing order {order.get('id', 'unknown')}: {e}")
         return False
-    
+
     return True
 
 def main():
     args = parse_args()
     sheets_client = setup_google_sheets()
-    
+
     try:
         # Search for orders
         orders_response = search_orders(args.start_date)
-        
+
         if 'orders' in orders_response:
             orders = orders_response['orders']
             print(f"Found {len(orders)} orders")
-            
+
             # Process each order individually
             successful_orders = 0
             for order in orders:
                 if process_order(order, sheets_client):
                     successful_orders += 1
-            
-            print(f"\nOrder Status Summary:")
+
+            print("\nOrder Status Summary:")
             print(f"Not Fulfilled: {ORDER_STATUS_COUNTS['NOT_FULFILLED']}")
             print(f"Picked Up: {ORDER_STATUS_COUNTS['PICKED_UP']}")
             print(f"Completed/Shipped: {ORDER_STATUS_COUNTS['COMPLETED']}")
             print(f"No Fulfillment Info: {ORDER_STATUS_COUNTS['NO_FULFILLMENT']}")
             print(f"\nSuccessfully processed {successful_orders} out of {len(orders)} orders")
-            
+
             print("\nItem Quantities:")
             for item_id, quantity in ITEM_QUANTITIES.items():
                 print(f"Item {item_id}: {quantity}")
         else:
             print("No orders found")
-        
+
     except requests.exceptions.RequestException as e:
         print(f"Error making request to Square API: {e}")
         sys.exit(1)
@@ -209,4 +214,4 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    main() 
+    main()
