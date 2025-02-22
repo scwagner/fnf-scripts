@@ -79,12 +79,6 @@ def setup_google_sheets():
         if not sheet_url:
             raise ValueError("GOOGLE_SHEET_URL environment variable is not set")
 
-        # Open the spreadsheet and write test value
-        spreadsheet = client.open_by_url(sheet_url)
-        worksheet = spreadsheet.worksheet('Sheet1')
-        worksheet.update('A1', [['Test Value']])
-        print("Successfully wrote test value to spreadsheet")
-
         return client
     except FileNotFoundError as fnf_error:
         print(f"File not found error: {fnf_error}")
@@ -389,15 +383,15 @@ def save_preorder_data(sheets_client):
         # Add summary row at the top with current time and not fulfilled count
         current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
         summary = [[
-            f"Order Summary: {ORDER_STATUS_COUNTS['NOT_FULFILLED']} orders pending fulfillment | Sheet last updated: {current_time}",
+            f"Order Summary: {ORDER_STATUS_COUNTS['NOT_FULFILLED']} orders processed | Sheet last updated: {current_time}",
             "", "", "", "", ""
         ]]
 
         # Set up headers - now in row 2
-        headers = [['Item ID', 'Full name', 'Designer', 'Room Number', 'Item', 'Pre-ordered', 'In Carts', 'Total', 'Is Market Item']]
+        headers = [['Item ID', 'Full name', 'Designer', 'Room Number', 'Item', 'Pre-ordered', 'In Carts', 'Total']]
 
         # Update both summary and headers at once
-        worksheet.update(values=summary + headers, range_name='A1:I2')
+        worksheet.update(values=summary + headers, range_name='A1:H2')
 
         # Format summary row
         summary_format = {
@@ -406,7 +400,7 @@ def save_preorder_data(sheets_client):
                 "fontSize": 12
             }
         }
-        worksheet.format('A1:I1', summary_format)
+        worksheet.format('A1:H1', summary_format)
 
         # Format header row - now in row 2
         header_format = {
@@ -419,7 +413,7 @@ def save_preorder_data(sheets_client):
                 "bold": True
             }
         }
-        worksheet.format('A2:I2', header_format)
+        worksheet.format('A2:H2', header_format)
 
         # Prepare data for writing - now starting at row 3
         data = []
@@ -435,12 +429,11 @@ def save_preorder_data(sheets_client):
                     item_data['quantity'],
                     item_data['qty_in_carts'],
                     f'=SUM(C{{row}}:D{{row}})',
-                    is_market_item(catalog_item),
                 ])
 
         # Clear existing data (except headers) and write new data
         if data:
-            worksheet.batch_clear(['A3:I1000'])  # Start clearing from row 3
+            worksheet.batch_clear(['A3:H1000'])  # Start clearing from row 3
 
             # Update the formulas with correct row numbers and ensure they're treated as formulas
             for i, row in enumerate(data, start=3):  # Start enumeration from row 3
@@ -452,6 +445,41 @@ def save_preorder_data(sheets_client):
             print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
         else:
             print("No items to write to the sheet")
+
+        # After writing data to Pre-Orders sheet, collect all designers
+        designers = set()  # Use a set to avoid duplicates
+        if data:
+            for row in data:
+                designer = row[2]  # Designer is in column C (index 2)
+                if designer and designer != 'Unknown Designer':
+                    designers.add(designer)
+
+        # Now handle the Designers sheet
+        try:
+            designers_sheet = spreadsheet.worksheet('Designers')
+        except gspread.WorksheetNotFound:
+            designers_sheet = spreadsheet.add_worksheet('Designers', 1000, 3)
+            # Add headers if creating new sheet
+            designers_sheet.update('A1:C1', [['Designer', 'Room Number', 'Notes']])
+
+        # Get existing designers
+        existing_designers = designers_sheet.col_values(1)[1:]  # Skip header row
+
+        # Find new designers to add
+        new_designers = designers - set(existing_designers)
+
+        if new_designers:
+            # Get the next empty row
+            next_row = len(existing_designers) + 2  # +2 for header row and 1-based index
+
+            # Prepare new rows
+            new_rows = [[designer, '', ''] for designer in new_designers]
+
+            # Add new designers
+            designers_sheet.update(f'A{next_row}:C{next_row + len(new_rows) - 1}', new_rows)
+            print(f"Added {len(new_rows)} new designers to Designers sheet")
+        else:
+            print("No new designers to add")
 
     except Exception as e:
         print(f"Error saving to Google Sheets: {e}")
