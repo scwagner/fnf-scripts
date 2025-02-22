@@ -66,10 +66,27 @@ def setup_google_sheets():
             scopes=scope
         )
         client = gspread.authorize(creds)
+
+        # Get spreadsheet URL from environment variable
+        sheet_url = os.getenv('GOOGLE_SHEET_URL')
+        if not sheet_url:
+            raise ValueError("GOOGLE_SHEET_URL environment variable is not set")
+
+        # Open the spreadsheet and write test value
+        spreadsheet = client.open_by_url(sheet_url)
+        worksheet = spreadsheet.worksheet('Sheet1')
+        worksheet.update('A1', [['Test Value']])
+        print("Successfully wrote test value to spreadsheet")
+
         return client
+    except FileNotFoundError as fnf_error:
+        print(f"File not found error: {fnf_error}")
+    except ValueError as val_error:
+        print(f"Value error: {val_error}")
     except Exception as e:
-        print(f"Error setting up Google Sheets: {e}")
-        sys.exit(1)
+        print(f"General error setting up Google Sheets: {e}")
+        print(f"Exception details: {e.__class__.__name__}: {e}")
+    sys.exit(1)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Gather preorders from Square API')
