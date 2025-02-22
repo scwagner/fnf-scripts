@@ -291,6 +291,71 @@ def process_order(order, sheets_client):
 
     return True
 
+def save_preorder_data(sheets_client):
+    """
+    Save preorder data to Google Sheets in the 'Pre-Orders' worksheet
+    Args:
+        sheets_client: Authorized Google Sheets client
+    """
+    try:
+        # Get spreadsheet URL from environment variable
+        sheet_url = os.getenv('GOOGLE_SHEET_URL')
+        spreadsheet = sheets_client.open_by_url(sheet_url)
+
+        # Try to get the Pre-Orders worksheet, create it if it doesn't exist
+        try:
+            worksheet = spreadsheet.worksheet('Pre-Orders')
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet('Pre-Orders', 1000, 5)
+
+        # Set up headers - now done every time
+        headers = [['Item ID', 'Item Name', 'Pre-ordered', 'In Carts', 'Total']]
+        worksheet.update(values=headers, range_name='A1:E1')
+
+        # Format header row - now done every time
+        header_format = {
+            "backgroundColor": {
+                "red": 0.8,
+                "green": 0.9,
+                "blue": 1.0
+            },
+            "textFormat": {
+                "bold": True
+            }
+        }
+        worksheet.format('A1:E1', header_format)
+
+        # Prepare data for writing
+        data = []
+        for item_id, item_data in ITEM_QUANTITIES.items():
+            data.append([
+                item_id,
+                item_data['name'],
+                item_data['quantity'],
+                item_data['qty_in_carts'],
+                f'=SUM(C{{row}}:D{{row}})'  # Note the double curly braces
+            ])
+
+        # Clear existing data (except headers) and write new data
+        if data:
+            worksheet.batch_clear(['A2:E1000'])
+
+            # Update the formulas with correct row numbers and ensure they're treated as formulas
+            for i, row in enumerate(data, start=2):
+                row[4] = f'=SUM(C{i}:D{i})'  # Direct formula insertion
+
+            # Use raw parameter to ensure formulas are not escaped
+            worksheet.update(values=data, range_name='A2', raw=False)
+            print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
+        else:
+            print("No items to write to the sheet")
+
+    except Exception as e:
+        print(f"Error saving to Google Sheets: {e}")
+        return False
+
+    return True
+
 def main():
     args = parse_args()
     sheets_client = setup_google_sheets()
@@ -316,6 +381,9 @@ def main():
             print("\nItem Quantities:")
             for item_id, item_data in ITEM_QUANTITIES.items():
                 print(f"{item_data['name']} (ID: {item_id}): {item_data['quantity']} in carts: {item_data['qty_in_carts']}")
+
+            # Save data to Google Sheets
+            save_preorder_data(sheets_client)
         else:
             print("No orders found")
 
