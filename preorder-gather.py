@@ -6,6 +6,8 @@ import argparse
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+import json
+import atexit
 
 # Load environment variables from .creds/.env
 env_path = os.path.join(os.path.dirname(__file__), '.creds', '.env')
@@ -41,6 +43,11 @@ ORDER_STATUS_COUNTS = {
     'STILL_SHOPPING': 0,
     'CANCELED': 0
 }
+
+# Add these constants near the top with other globals
+MARKET_CATEGORY_ID = os.getenv('MARKET_CATEGORY_ID')
+CACHE_FILE_PATH = os.path.join(os.path.dirname(__file__), '.creds', 'catalog_cache.json')
+CATALOG_ITEMS_CACHE = {}  # Will be loaded from disk if available
 
 def setup_google_sheets():
     # Define the scope for Google Sheets API
@@ -138,6 +145,26 @@ def search_orders(start_date_str):
     response.raise_for_status()  # Raise exception for non-200 status codes
     return response.json()
 
+def extract_designer_name(item_name):
+    """Extract designer name from item name"""
+    if ' by ' in item_name:
+        return item_name.split(' by ')[1]
+    if '-count' in item_name:
+        # Extract designer name from strings like "PRE-ORDER: 18-count Pumpkin Patch Aida - BeStitchMe (Fat Half)"
+        import re
+        match = re.search(r' - ([^(]+)', item_name)
+        if match:
+            return match.group(1).strip()
+    return 'Unknown Designer'
+
+def extract_item_name(item_name):
+    """Extract item name from item name"""
+    return_value = item_name.split(' by ')[0] if ' by ' in item_name else item_name
+    # Remove 'PRE-ORDER: ' prefix if present
+    if return_value.startswith('PRE-ORDER: '):
+        return_value = return_value[11:]
+    return return_value
+
 class Order:
     def __init__(self, order_data):
         self.order_data = order_data
@@ -210,6 +237,57 @@ class OrderItem:
             return f"{self.item_data.get('name')} ({variation})"
         return self.item_data.get('name', '')
 
+
+def get_catalog_item(item_id):
+    """
+    Fetch catalog item details from Square API or cache
+    Args:
+        item_id: The Square catalog item ID
+    Returns:
+        Catalog item data or None if not found
+    """
+    if item_id in CATALOG_ITEMS_CACHE:
+        return_value = CATALOG_ITEMS_CACHE[item_id]
+        if return_value.get('type') == 'ITEM_VARIATION' and len(return_value.get('parent_item', {})) > 0:
+            del return_value['parent_item']
+            CATALOG_ITEMS_CACHE[item_id] = return_value
+        return return_value
+
+    try:
+        print(f"Fetching catalog item {item_id}")
+        endpoint = f"{SQUARE_API_BASE_URL}/catalog/object/{item_id}?include_category_path_to_root=true&include_related_objects=true"
+        response = requests.get(endpoint, headers=headers)
+        response.raise_for_status()
+        item_data = response.json().get('object', {})
+        CATALOG_ITEMS_CACHE[item_id] = item_data
+        if item_data.get('type') == 'ITEM_VARIATION':
+            parent_item_id = item_data.get('item_variation_data', {}).get('item_id', '')
+            if parent_item_id:
+                parent_item_data = get_catalog_item(parent_item_id)
+        return item_data
+    except Exception as e:
+        print(f"Error fetching catalog item {item_id}: {e}")
+        return None
+
+def is_market_item(item_data):
+    """
+    Check if an item belongs to the market category
+    Args:
+        item_data: Catalog item data from Square API
+    Returns:
+        Boolean indicating if item belongs to market category
+    """
+    if not item_data:
+        return False
+
+    category_ids = []
+    if item_data.get('type') == 'ITEM_VARIATION':
+        parent_item_id = item_data.get('item_variation_data', {}).get('item_id', '')
+        parent_item = get_catalog_item(parent_item_id)
+        category_ids = [category.get('id', '') for category in parent_item.get('item_data', {}).get('categories', [])]
+
+    # print(f'category_ids: {category_ids}, MARKET_CATEGORY_ID: {MARKET_CATEGORY_ID}, {MARKET_CATEGORY_ID in category_ids}')
+    return MARKET_CATEGORY_ID in category_ids
 
 def process_order(order, sheets_client):
     """
@@ -308,11 +386,29 @@ def save_preorder_data(sheets_client):
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet('Pre-Orders', 1000, 5)
 
-        # Set up headers - now done every time
-        headers = [['Item ID', 'Item Name', 'Pre-ordered', 'In Carts', 'Total']]
-        worksheet.update(values=headers, range_name='A1:E1')
+        # Add summary row at the top with current time and not fulfilled count
+        current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
+        summary = [[
+            f"Order Summary: {ORDER_STATUS_COUNTS['NOT_FULFILLED']} orders pending fulfillment | Sheet last updated: {current_time}",
+            "", "", "", "", ""
+        ]]
 
-        # Format header row - now done every time
+        # Set up headers - now in row 2
+        headers = [['Item ID', 'Full name', 'Designer', 'Room Number', 'Item', 'Pre-ordered', 'In Carts', 'Total', 'Is Market Item']]
+
+        # Update both summary and headers at once
+        worksheet.update(values=summary + headers, range_name='A1:I2')
+
+        # Format summary row
+        summary_format = {
+            "textFormat": {
+                "bold": True,
+                "fontSize": 12
+            }
+        }
+        worksheet.format('A1:I1', summary_format)
+
+        # Format header row - now in row 2
         header_format = {
             "backgroundColor": {
                 "red": 0.8,
@@ -323,29 +419,36 @@ def save_preorder_data(sheets_client):
                 "bold": True
             }
         }
-        worksheet.format('A1:E1', header_format)
+        worksheet.format('A2:I2', header_format)
 
-        # Prepare data for writing
+        # Prepare data for writing - now starting at row 3
         data = []
         for item_id, item_data in ITEM_QUANTITIES.items():
-            data.append([
-                item_id,
-                item_data['name'],
-                item_data['quantity'],
-                item_data['qty_in_carts'],
-                f'=SUM(C{{row}}:D{{row}})'  # Note the double curly braces
-            ])
+            catalog_item = get_catalog_item(item_id)
+            if catalog_item and is_market_item(catalog_item):
+                data.append([
+                    item_id,
+                    item_data['name'],
+                    extract_designer_name(item_data['name']),
+                    'room_number_placeholder',
+                    extract_item_name(item_data['name']),
+                    item_data['quantity'],
+                    item_data['qty_in_carts'],
+                    f'=SUM(C{{row}}:D{{row}})',
+                    is_market_item(catalog_item),
+                ])
 
         # Clear existing data (except headers) and write new data
         if data:
-            worksheet.batch_clear(['A2:E1000'])
+            worksheet.batch_clear(['A3:I1000'])  # Start clearing from row 3
 
             # Update the formulas with correct row numbers and ensure they're treated as formulas
-            for i, row in enumerate(data, start=2):
-                row[4] = f'=SUM(C{i}:D{i})'  # Direct formula insertion
+            for i, row in enumerate(data, start=3):  # Start enumeration from row 3
+                row[3] = f'=DGET(DesignerLookup,"Room Number",{{"Designer";C{i}}})'
+                row[7] = f'=SUM(F{i}:G{i})'
 
             # Use raw parameter to ensure formulas are not escaped
-            worksheet.update(values=data, range_name='A2', raw=False)
+            worksheet.update(values=data, range_name='A3', raw=False)  # Start data from row 3
             print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
         else:
             print("No items to write to the sheet")
@@ -356,7 +459,33 @@ def save_preorder_data(sheets_client):
 
     return True
 
+def load_catalog_cache():
+    """Load the catalog cache from disk if it exists"""
+    try:
+        if os.path.exists(CACHE_FILE_PATH):
+            with open(CACHE_FILE_PATH, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to load catalog cache: {e}")
+    return {}
+
+def save_catalog_cache():
+    """Save the catalog cache to disk"""
+    try:
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
+        with open(CACHE_FILE_PATH, 'w') as f:
+            json.dump(CATALOG_ITEMS_CACHE, f)
+        print(f"Saved {len(CATALOG_ITEMS_CACHE)} items to catalog cache")
+    except Exception as e:
+        print(f"Warning: Failed to save catalog cache: {e}")
+
 def main():
+    global CATALOG_ITEMS_CACHE
+    CATALOG_ITEMS_CACHE = load_catalog_cache()
+    # Register the save function to run on exit
+    atexit.register(save_catalog_cache)
+
     args = parse_args()
     sheets_client = setup_google_sheets()
 
