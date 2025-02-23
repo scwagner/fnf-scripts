@@ -3,6 +3,10 @@ import os
 import sys
 
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .creds/.env
+load_dotenv('.creds/.env')
 
 
 def main():

@@ -1,4 +1,6 @@
 .venv/
-.creds/
+**/.creds
 .env
 log.txt
+get-catalog/items/
+

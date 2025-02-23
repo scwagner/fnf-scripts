@@ -3,6 +3,11 @@ import os
 
 import requests
 
+from dotenv import load_dotenv
+
+# Load environment variables from .creds/.env
+load_dotenv('.creds/.env')
+
 
 def main():
     # Get the contents of the environment variable SQUARE_API_KEY into a string
