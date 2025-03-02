@@ -515,17 +515,33 @@ def save_preorder_data(sheets_client, skip_write=False, debug_items=None):
             })
             time.sleep(RATE_LIMIT_SLEEP)
 
+        # Calculate expected totals from order line items
+        expected_totals = {}
+        for customer_name, orders in CUSTOMER_ORDERS.items():
+            for order in orders:
+                for item in order['items']:
+                    item_name = item['name']
+                    quantity = item['quantity']
+                    if item_name not in expected_totals:
+                        expected_totals[item_name] = 0
+                    expected_totals[item_name] += quantity
+
         # Modify the data preparation section
         data = []
+        actual_totals = {}  # Track actual totals written to sheet
         for item_id, item_data in ITEM_QUANTITIES.items():
             catalog_item = get_catalog_item(item_id)
             if catalog_item and is_market_item(catalog_item):
                 item_name = item_data['name']
+                quantity = item_data['quantity']
+
+                # Track actual totals
+                actual_totals[item_name] = quantity
 
                 # Debug output for matching items
                 if is_debug_item(item_name, debug_items):
                     print(f"\nDebug: Found matching item in pre-orders: {item_name}")
-                    print(f"Quantity ordered: {item_data['quantity']}")
+                    print(f"Quantity ordered: {quantity}")
                     # Find all orders containing this item
                     for customer_name, orders in CUSTOMER_ORDERS.items():
                         for order in orders:
@@ -549,7 +565,7 @@ def save_preorder_data(sheets_client, skip_write=False, debug_items=None):
                     designer,
                     room_number,
                     extract_item_name(item_data['name']),
-                    item_data['quantity'],
+                    quantity,
                     room_num_sort  # Add sort key but don't write to sheet
                 ])
 
@@ -608,6 +624,43 @@ def save_preorder_data(sheets_client, skip_write=False, debug_items=None):
             print(f"Added {len(new_rows)} new designers to Designers sheet")
         else:
             print("No new designers to add")
+
+        # After writing data, compare totals
+        print("\nPre-Order Quantity Validation:")
+        print("------------------------------")
+        # Filter for only pre-order items
+        all_items = {item for item in (expected_totals.keys() | actual_totals.keys())
+                    if 'pre-order' in item.lower()}
+
+        if not all_items:
+            print("No pre-order items found to validate")
+        else:
+            has_discrepancy = False
+            for item in sorted(all_items):
+                expected = expected_totals.get(item, 0)
+                actual = actual_totals.get(item, 0)
+                if expected != actual:
+                    has_discrepancy = True
+                    print(f"\nDiscrepancy found for: {item}")
+                    print(f"  Expected: {expected}")
+                    print(f"  Actual: {actual}")
+
+                    # Find orders containing this item for debugging
+                    print("  Orders containing this item:")
+                    for customer_name, orders in CUSTOMER_ORDERS.items():
+                        for order in orders:
+                            for order_item in order['items']:
+                                if order_item['name'] == item:
+                                    print(f"    - Order {order['order_id']} by {customer_name}")
+                                    print(f"      Quantity: {order_item['quantity']}")
+                                    print(f"      Status: {order['status']}")
+                                    print(f"      Created at: {order['created_at']}")
+
+            if not has_discrepancy:
+                print("All pre-order quantities match expected totals!")
+            else:
+                print("\nWarning: Discrepancies found between expected and actual pre-order quantities!")
+                print("Please review the details above.")
 
     except Exception as e:
         print(f"Error saving to Google Sheets: {e}")
