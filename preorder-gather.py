@@ -108,6 +108,16 @@ def parse_args():
         required=True,
         help='Start date for order search (YYYY-MM-DD format)'
     )
+    parser.add_argument(
+        '--skip-preorders',
+        action='store_true',
+        help='Skip writing to the Pre-Orders spreadsheet'
+    )
+    parser.add_argument(
+        '--skip-customer-orders',
+        action='store_true',
+        help='Skip writing to the Customer Orders spreadsheet'
+    )
     args = parser.parse_args()
 
     # Validate date format
@@ -441,7 +451,7 @@ def load_designer_room_numbers(sheets_client):
     except Exception as e:
         print(f"Error loading designer room numbers: {e}")
 
-def rate_limited_update(worksheet, values, range_name=None, value_input_option='RAW'):
+def rate_limited_update(worksheet, values, range_name=None, value_input_option='RAW', skip_write=False):
     """
     Perform a rate-limited update to Google Sheets
     Args:
@@ -449,8 +459,13 @@ def rate_limited_update(worksheet, values, range_name=None, value_input_option='
         values: The values to write
         range_name: Optional range name for the update
         value_input_option: The input option for the update
+        skip_write: If True, skip the actual write operation
     """
     try:
+        if skip_write:
+            print(f"Skipping write operation for worksheet {worksheet.title}")
+            return
+
         if range_name:
             worksheet.update(values=values, range_name=range_name, value_input_option=value_input_option)
         else:
@@ -461,11 +476,12 @@ def rate_limited_update(worksheet, values, range_name=None, value_input_option='
         print(f"Error during worksheet update: {e}")
         raise
 
-def save_preorder_data(sheets_client):
+def save_preorder_data(sheets_client, skip_write=False):
     """
     Save preorder data to Google Sheets in the 'Pre-Orders' worksheet
     Args:
         sheets_client: Authorized Google Sheets client
+        skip_write: If True, skip the actual write operations
     """
     try:
         # Load designer room numbers first
@@ -479,40 +495,44 @@ def save_preorder_data(sheets_client):
         try:
             worksheet = spreadsheet.worksheet('Pre-Orders')
         except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet('Pre-Orders', 1000, 5)
+            if not skip_write:
+                worksheet = spreadsheet.add_worksheet('Pre-Orders', 1000, 5)
+            else:
+                print("Would create Pre-Orders worksheet")
+                return True
 
         # Add summary row at the top with current time and not fulfilled count
         current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
         summary = [[
             f"Order Summary: {ORDER_STATUS_COUNTS['NOT_FULFILLED']} orders processed | Sheet last updated: {current_time}",
-            "", "", ""  # Reduced from 6 empty strings to 4 total columns
+            "", "", ""
         ]]
 
         # Set up headers - now in row 2
         headers = [['Designer', 'Room Number', 'Item', 'Pre-ordered']]
 
         # Update summary and headers with rate limiting
-        rate_limited_update(worksheet, summary + headers, 'A1:D2')
+        rate_limited_update(worksheet, summary + headers, 'A1:D2', skip_write=skip_write)
 
-        # Format rows with rate limiting
-        worksheet.format('A1:D1', {
-            "textFormat": {
-                "bold": True,
-                "fontSize": 12
-            }
-        })
-        time.sleep(RATE_LIMIT_SLEEP)
-        worksheet.format('A2:D2', {
-            "backgroundColor": {
-                "red": 0.8,
-                "green": 0.9,
-                "blue": 1.0
-            },
-            "textFormat": {
-                "bold": True
-            }
-        })
-        time.sleep(RATE_LIMIT_SLEEP)
+        if not skip_write:
+            worksheet.format('A1:D1', {
+                "textFormat": {
+                    "bold": True,
+                    "fontSize": 12
+                }
+            })
+            time.sleep(RATE_LIMIT_SLEEP)
+            worksheet.format('A2:D2', {
+                "backgroundColor": {
+                    "red": 0.8,
+                    "green": 0.9,
+                    "blue": 1.0
+                },
+                "textFormat": {
+                    "bold": True
+                }
+            })
+            time.sleep(RATE_LIMIT_SLEEP)
 
         # Modify the data preparation section
         data = []
@@ -553,7 +573,7 @@ def save_preorder_data(sheets_client):
         if final_data:
             worksheet.batch_clear(['A3:D1000'])
             time.sleep(RATE_LIMIT_SLEEP)
-            rate_limited_update(worksheet, final_data, 'A3')
+            rate_limited_update(worksheet, final_data, 'A3', skip_write=skip_write)
             print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
         else:
             print("No items to write to the sheet")
@@ -571,8 +591,6 @@ def save_preorder_data(sheets_client):
             designers_sheet = spreadsheet.worksheet('Designers')
         except gspread.WorksheetNotFound:
             designers_sheet = spreadsheet.add_worksheet('Designers', 1000, 3)
-            time.sleep(RATE_LIMIT_SLEEP)
-            rate_limited_update(designers_sheet, [['Designer', 'Room Number', 'Notes']], 'A1:C1')
 
         # Get existing designers
         existing_designers = designers_sheet.col_values(1)[1:]  # Skip header row
@@ -588,7 +606,7 @@ def save_preorder_data(sheets_client):
             new_rows = [[designer, '', ''] for designer in new_designers]
 
             # Add new designers
-            rate_limited_update(designers_sheet, new_rows, f'A{next_row}:C{next_row + len(new_rows) - 1}')
+            rate_limited_update(designers_sheet, new_rows, f'A{next_row}:C{next_row + len(new_rows) - 1}', skip_write=skip_write)
             print(f"Added {len(new_rows)} new designers to Designers sheet")
         else:
             print("No new designers to add")
@@ -642,19 +660,20 @@ def process_item_details(item_name):
 
     return preorder_status, designer, clean_name
 
-def save_customer_orders(sheets_client):
+def save_customer_orders(sheets_client, skip_write=False):
     try:
         spreadsheet = sheets_client.open_by_url(SECOND_SHEET_URL)
 
         # Delete all existing sheets except !Summary from the second spreadsheet
-        try:
-            worksheets = spreadsheet.worksheets()
-            for worksheet in worksheets:
-                if worksheet.title != '!Summary':
-                    spreadsheet.del_worksheet(worksheet)
-                    time.sleep(RATE_LIMIT_SLEEP)
-        except Exception as e:
-            print(f"Error deleting existing sheets: {e}")
+        if not skip_write:
+            try:
+                worksheets = spreadsheet.worksheets()
+                for worksheet in worksheets:
+                    if worksheet.title != '!Summary':
+                        spreadsheet.del_worksheet(worksheet)
+                        time.sleep(RATE_LIMIT_SLEEP)
+            except Exception as e:
+                print(f"Error deleting existing sheets: {e}")
 
         # Get or create !Summary sheet
         try:
@@ -707,7 +726,7 @@ def save_customer_orders(sheets_client):
                         ])
 
                 if data:
-                    rate_limited_update(worksheet, data, f'A4:D{len(data)+3}')
+                    rate_limited_update(worksheet, data, f'A4:D{len(data)+3}', skip_write=skip_write)
 
                 # Auto-resize all columns
                 worksheet.columns_auto_resize(0, 4)  # Resize columns A through D
@@ -722,18 +741,18 @@ def save_customer_orders(sheets_client):
         # Update !Summary sheet
         try:
             # Update headers
-            rate_limited_update(summary_sheet, [summary_headers], 'A1:C1')
+            rate_limited_update(summary_sheet, [summary_headers], 'A1:C1', skip_write=skip_write)
 
             # Format headers
             summary_sheet.format('A1:C1', {
                 "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0},
                 "textFormat": {"bold": True}
-            })
+            }, skip_write=skip_write)
             time.sleep(RATE_LIMIT_SLEEP)
 
             # Update data
             if summary_data:
-                rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED')
+                rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED', skip_write=skip_write)
 
             # Auto-resize summary columns
             summary_sheet.columns_auto_resize(0, 3)  # Resize columns A through C
@@ -802,9 +821,9 @@ def main():
             for item_id, item_data in ITEM_QUANTITIES.items():
                 print(f"{item_data['name']} (ID: {item_id}): {item_data['quantity']} in carts: {item_data['qty_in_carts']}")
 
-            # Save data to both spreadsheets
-            save_preorder_data(sheets_client)
-            save_customer_orders(sheets_client)
+            # Save data to both spreadsheets with skip flags
+            save_preorder_data(sheets_client, args.skip_preorders)
+            save_customer_orders(sheets_client, args.skip_customer_orders)
         else:
             print("No orders found")
 
