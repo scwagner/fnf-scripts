@@ -325,20 +325,6 @@ def process_order(order, sheets_client):
 
         if order.is_still_shopping():
             ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
-            return False
-            line_items = order.get_line_items()
-            for item in line_items:
-                order_item = OrderItem(item)
-                quantity = int(float(item.get('quantity', 0)))
-                catalog_id = item.get('catalog_object_id')
-                if catalog_id in ITEM_QUANTITIES:
-                    ITEM_QUANTITIES[catalog_id]['qty_in_carts'] += quantity
-                else:
-                    ITEM_QUANTITIES[catalog_id] = {
-                        'name': order_item.get_name(),
-                        'quantity': 0,
-                        'qty_in_carts': quantity
-                    }
             print(f"Skipping order {order.get_order_id()}: Still Shopping ({order.get_amount_due()} in cart)")
             return False
 
@@ -355,34 +341,16 @@ def process_order(order, sheets_client):
             return False
 
         ORDER_STATUS_COUNTS['NOT_FULFILLED'] += 1
-        # Process line items for not fulfilled orders
-        for item in order.get_line_items():
-            order_item = OrderItem(item)
-            catalog_object_id = item.get('catalog_object_id')
-            quantity = int(float(item.get('quantity', 0)))
-
-            if catalog_object_id:
-                if catalog_object_id not in ITEM_QUANTITIES:
-                    ITEM_QUANTITIES[catalog_object_id] = {
-                        'name': order_item.get_name(),
-                        'quantity': quantity,
-                        'qty_in_carts': 0,
-                    }
-                else:
-                    ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
 
         customer_info = order.get_customer_info()
         customer_name = customer_info['name']
 
-        # Skip if no customer name
         if customer_name == 'N/A':
             return False
 
-        # Initialize customer's order list if not exists
         if customer_name not in CUSTOMER_ORDERS:
             CUSTOMER_ORDERS[customer_name] = []
 
-        # Collect order details
         order_details = {
             'order_id': order.get_order_id(),
             'created_at': order.get_created_at(),
@@ -390,19 +358,19 @@ def process_order(order, sheets_client):
             'items': []
         }
 
-        # Process line items
+        # Process items only once
         for item in order.get_line_items():
             order_item = OrderItem(item)
             catalog_object_id = item.get('catalog_object_id')
             quantity = int(float(item.get('quantity', 0)))
 
-            # Add item details to order
+            # Add to order details
             order_details['items'].append({
                 'name': order_item.get_name(),
                 'quantity': quantity
             })
 
-            # Update global item quantities as before
+            # Update global quantities (only once)
             if catalog_object_id:
                 if catalog_object_id not in ITEM_QUANTITIES:
                     ITEM_QUANTITIES[catalog_object_id] = {
@@ -413,7 +381,6 @@ def process_order(order, sheets_client):
                 else:
                     ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
 
-        # Add order details to customer's orders
         CUSTOMER_ORDERS[customer_name].append(order_details)
 
         print(order.order_data)
