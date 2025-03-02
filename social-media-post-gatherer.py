@@ -23,7 +23,7 @@ def is_child_category(category):
     item_type = category.get('type', '')
     if item_type != 'CATEGORY':
         return False
-    
+
     category_data = category.get("category_data", {})
     parent_category = category_data.get("parent_category", {})
     parent_category_id = parent_category.get("id", "")
@@ -65,6 +65,9 @@ def process_child_category(child_category):
     url = f"{api_root}/catalog/search-catalog-items"
     response = requests.post(url, headers=get_headers(), json=params)
     response_json = response.json()
+    if not "items" in response_json:
+        print(f"No items found for {child_category['category_data']['name']}")
+        return
     items = response_json["items"]
     for item in items:
         print(item["item_data"]["name"])
@@ -93,8 +96,8 @@ def process_child_category(child_category):
             print(f"Image URL: {image_url}")
             if len(image_url) > 0:
                 # Get file extension from URL
-                file_ext = os.path.splitext(image_url)[1]            
-                
+                file_ext = os.path.splitext(image_url)[1]
+
                 # Download and save image
                 img_response = requests.get(image_url)
                 if img_response.status_code == 200:
