@@ -8,6 +8,7 @@ from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 import json
 import atexit
+import time
 
 # Load environment variables from .creds/.env
 env_path = os.path.join(os.path.dirname(__file__), '.creds', '.env')
@@ -48,6 +49,16 @@ ORDER_STATUS_COUNTS = {
 MARKET_CATEGORY_ID = os.getenv('MARKET_CATEGORY_ID')
 CACHE_FILE_PATH = os.path.join(os.path.dirname(__file__), '.creds', 'catalog_cache.json')
 CATALOG_ITEMS_CACHE = {}  # Will be loaded from disk if available
+
+# Add this near the top with other globals
+DESIGNER_ROOM_NUMBERS = {}  # Will store {designer_name: room_number}
+
+# Add near the top with other globals
+CUSTOMER_ORDERS = {}  # Will store {customer_name: [list of order details]}
+SECOND_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hhXCfphftezK_W1NYXeyFtYJgY8g9taITaQ0yUiTBx0/edit?gid=0#gid=0"
+
+# Add near the top with other globals
+RATE_LIMIT_SLEEP = 1  # Sleep duration in seconds between API calls
 
 def setup_google_sheets():
     # Define the scope for Google Sheets API
@@ -299,6 +310,7 @@ def process_order(order, sheets_client):
 
         if order.is_still_shopping():
             ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
+            return False
             line_items = order.get_line_items()
             for item in line_items:
                 order_item = OrderItem(item)
@@ -345,6 +357,49 @@ def process_order(order, sheets_client):
                     ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
 
         customer_info = order.get_customer_info()
+        customer_name = customer_info['name']
+
+        # Skip if no customer name
+        if customer_name == 'N/A':
+            return False
+
+        # Initialize customer's order list if not exists
+        if customer_name not in CUSTOMER_ORDERS:
+            CUSTOMER_ORDERS[customer_name] = []
+
+        # Collect order details
+        order_details = {
+            'order_id': order.get_order_id(),
+            'created_at': order.get_created_at(),
+            'status': order.get_fulfillment_status(),
+            'items': []
+        }
+
+        # Process line items
+        for item in order.get_line_items():
+            order_item = OrderItem(item)
+            catalog_object_id = item.get('catalog_object_id')
+            quantity = int(float(item.get('quantity', 0)))
+
+            # Add item details to order
+            order_details['items'].append({
+                'name': order_item.get_name(),
+                'quantity': quantity
+            })
+
+            # Update global item quantities as before
+            if catalog_object_id:
+                if catalog_object_id not in ITEM_QUANTITIES:
+                    ITEM_QUANTITIES[catalog_object_id] = {
+                        'name': order_item.get_name(),
+                        'quantity': quantity,
+                        'qty_in_carts': 0,
+                    }
+                else:
+                    ITEM_QUANTITIES[catalog_object_id]['quantity'] += quantity
+
+        # Add order details to customer's orders
+        CUSTOMER_ORDERS[customer_name].append(order_details)
 
         print(order.order_data)
         print(f"Processing Order: {order.get_order_id()}")
@@ -363,6 +418,49 @@ def process_order(order, sheets_client):
 
     return True
 
+def load_designer_room_numbers(sheets_client):
+    """Load designer room numbers from the Designers sheet"""
+    try:
+        sheet_url = os.getenv('GOOGLE_SHEET_URL')
+        spreadsheet = sheets_client.open_by_url(sheet_url)
+
+        try:
+            designers_sheet = spreadsheet.worksheet('Designers')
+            # Get all values from the sheet
+            all_values = designers_sheet.get_all_values()
+
+            # Skip header row and create dictionary
+            for row in all_values[1:]:
+                if len(row) >= 2 and row[0] and row[1]:  # If designer and room number exist
+                    DESIGNER_ROOM_NUMBERS[row[0]] = row[1]
+
+            print(f"Loaded {len(DESIGNER_ROOM_NUMBERS)} designer room numbers")
+        except gspread.WorksheetNotFound:
+            print("Warning: Designers worksheet not found")
+
+    except Exception as e:
+        print(f"Error loading designer room numbers: {e}")
+
+def rate_limited_update(worksheet, values, range_name=None, value_input_option='RAW'):
+    """
+    Perform a rate-limited update to Google Sheets
+    Args:
+        worksheet: The worksheet to update
+        values: The values to write
+        range_name: Optional range name for the update
+        value_input_option: The input option for the update
+    """
+    try:
+        if range_name:
+            worksheet.update(values=values, range_name=range_name, value_input_option=value_input_option)
+        else:
+            worksheet.update(values=values, value_input_option=value_input_option)
+        print(f"Sleeping for {RATE_LIMIT_SLEEP}s to respect API quota...")
+        time.sleep(RATE_LIMIT_SLEEP)
+    except Exception as e:
+        print(f"Error during worksheet update: {e}")
+        raise
+
 def save_preorder_data(sheets_client):
     """
     Save preorder data to Google Sheets in the 'Pre-Orders' worksheet
@@ -370,6 +468,9 @@ def save_preorder_data(sheets_client):
         sheets_client: Authorized Google Sheets client
     """
     try:
+        # Load designer room numbers first
+        load_designer_room_numbers(sheets_client)
+
         # Get spreadsheet URL from environment variable
         sheet_url = os.getenv('GOOGLE_SHEET_URL')
         spreadsheet = sheets_client.open_by_url(sheet_url)
@@ -384,26 +485,24 @@ def save_preorder_data(sheets_client):
         current_time = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
         summary = [[
             f"Order Summary: {ORDER_STATUS_COUNTS['NOT_FULFILLED']} orders processed | Sheet last updated: {current_time}",
-            "", "", "", "", ""
+            "", "", ""  # Reduced from 6 empty strings to 4 total columns
         ]]
 
         # Set up headers - now in row 2
-        headers = [['Item ID', 'Full name', 'Designer', 'Room Number', 'Item', 'Pre-ordered', 'In Carts', 'Total']]
+        headers = [['Designer', 'Room Number', 'Item', 'Pre-ordered']]
 
-        # Update both summary and headers at once
-        worksheet.update(values=summary + headers, range_name='A1:H2')
+        # Update summary and headers with rate limiting
+        rate_limited_update(worksheet, summary + headers, 'A1:D2')
 
-        # Format summary row
-        summary_format = {
+        # Format rows with rate limiting
+        worksheet.format('A1:D1', {
             "textFormat": {
                 "bold": True,
                 "fontSize": 12
             }
-        }
-        worksheet.format('A1:H1', summary_format)
-
-        # Format header row - now in row 2
-        header_format = {
+        })
+        time.sleep(RATE_LIMIT_SLEEP)
+        worksheet.format('A2:D2', {
             "backgroundColor": {
                 "red": 0.8,
                 "green": 0.9,
@@ -412,36 +511,49 @@ def save_preorder_data(sheets_client):
             "textFormat": {
                 "bold": True
             }
-        }
-        worksheet.format('A2:H2', header_format)
+        })
+        time.sleep(RATE_LIMIT_SLEEP)
 
-        # Prepare data for writing - now starting at row 3
+        # Modify the data preparation section
         data = []
         for item_id, item_data in ITEM_QUANTITIES.items():
             catalog_item = get_catalog_item(item_id)
             if catalog_item and is_market_item(catalog_item):
+                designer = extract_designer_name(item_data['name'])
+                room_number = DESIGNER_ROOM_NUMBERS.get(designer, '')  # Get room number or empty string
+
+                # Convert room number to int for sorting, using -1 for empty/invalid numbers
+                try:
+                    room_num_sort = int(room_number) if room_number else -1
+                except ValueError:
+                    room_num_sort = -1
+
                 data.append([
-                    item_id,
-                    item_data['name'],
-                    extract_designer_name(item_data['name']),
-                    'room_number_placeholder',
+                    designer,
+                    room_number,
                     extract_item_name(item_data['name']),
                     item_data['quantity'],
-                    item_data['qty_in_carts'],
-                    f'=SUM(C{{row}}:D{{row}})',
+                    room_num_sort  # Add sort key but don't write to sheet
                 ])
 
-        # Clear existing data (except headers) and write new data
-        if data:
-            worksheet.batch_clear(['A3:H1000'])  # Start clearing from row 3
+        # Sort data by room number (descending) and then by item name
+        data.sort(key=lambda x: (-x[4], x[2]))  # Updated indices since we removed two columns
 
-            # Update the formulas with correct row numbers and ensure they're treated as formulas
-            for i, row in enumerate(data, start=3):  # Start enumeration from row 3
-                row[3] = f'=DGET(DesignerLookup,"Room Number",{{"Designer";C{i}}})'
-                row[7] = f'=SUM(F{i}:G{i})'
+        # Add blank rows between different room numbers
+        final_data = []
+        prev_room = None
+        for row in data:
+            current_room = row[1]  # Room number is in index 1
+            if prev_room is not None and current_room != prev_room:
+                final_data.append(['', '', '', ''])  # Add blank row
+            final_data.append(row[:-1])  # Add row without sort key
+            prev_room = current_room
 
-            # Use raw parameter to ensure formulas are not escaped
-            worksheet.update(values=data, range_name='A3', raw=False)  # Start data from row 3
+        # Clear and update data with rate limiting
+        if final_data:
+            worksheet.batch_clear(['A3:D1000'])
+            time.sleep(RATE_LIMIT_SLEEP)
+            rate_limited_update(worksheet, final_data, 'A3')
             print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
         else:
             print("No items to write to the sheet")
@@ -450,7 +562,7 @@ def save_preorder_data(sheets_client):
         designers = set()  # Use a set to avoid duplicates
         if data:
             for row in data:
-                designer = row[2]  # Designer is in column C (index 2)
+                designer = row[0]  # Designer is in column A (index 0)
                 if designer and designer != 'Unknown Designer':
                     designers.add(designer)
 
@@ -459,8 +571,8 @@ def save_preorder_data(sheets_client):
             designers_sheet = spreadsheet.worksheet('Designers')
         except gspread.WorksheetNotFound:
             designers_sheet = spreadsheet.add_worksheet('Designers', 1000, 3)
-            # Add headers if creating new sheet
-            designers_sheet.update('A1:C1', [['Designer', 'Room Number', 'Notes']])
+            time.sleep(RATE_LIMIT_SLEEP)
+            rate_limited_update(designers_sheet, [['Designer', 'Room Number', 'Notes']], 'A1:C1')
 
         # Get existing designers
         existing_designers = designers_sheet.col_values(1)[1:]  # Skip header row
@@ -476,13 +588,166 @@ def save_preorder_data(sheets_client):
             new_rows = [[designer, '', ''] for designer in new_designers]
 
             # Add new designers
-            designers_sheet.update(f'A{next_row}:C{next_row + len(new_rows) - 1}', new_rows)
+            rate_limited_update(designers_sheet, new_rows, f'A{next_row}:C{next_row + len(new_rows) - 1}')
             print(f"Added {len(new_rows)} new designers to Designers sheet")
         else:
             print("No new designers to add")
 
     except Exception as e:
         print(f"Error saving to Google Sheets: {e}")
+        return False
+
+    return True
+
+def format_customer_worksheet(worksheet, customer_name):
+    """Format the customer worksheet with header and styling"""
+    # Add customer name as header
+    worksheet.merge_cells('A1:D1')  # Reduced to 4 columns
+    rate_limited_update(worksheet, [[customer_name]], 'A1:D1')
+
+    # Format customer name
+    worksheet.format('A1:D1', {  # Reduced to 4 columns
+        "textFormat": {
+            "bold": True,
+            "fontSize": 14
+        },
+        "horizontalAlignment": "center",
+        "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
+    })
+    time.sleep(RATE_LIMIT_SLEEP)
+
+    # Add headers in row 3
+    headers = [['Pre-Order', 'Designer', 'Item Name', 'Quantity']]  # Removed Order ID, Created At, Status
+    rate_limited_update(worksheet, headers, 'A3:D3')  # Reduced to 4 columns
+
+    # Format headers
+    worksheet.format('A3:D3', {  # Reduced to 4 columns
+        "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0},
+        "textFormat": {"bold": True}
+    })
+    time.sleep(RATE_LIMIT_SLEEP)
+
+def process_item_details(item_name):
+    """Process item name to extract pre-order status, designer, and clean name"""
+    is_preorder = item_name.startswith('PRE-ORDER: ')
+
+    if is_preorder:
+        clean_name = extract_item_name(item_name)
+        designer = extract_designer_name(item_name)
+        preorder_status = ''
+    else:
+        clean_name = item_name
+        designer = ''
+        preorder_status = 'No'
+
+    return preorder_status, designer, clean_name
+
+def save_customer_orders(sheets_client):
+    try:
+        spreadsheet = sheets_client.open_by_url(SECOND_SHEET_URL)
+
+        # Rename Sheet1 to !Summary if needed
+        try:
+            summary_sheet = spreadsheet.sheet1
+            if summary_sheet.title != '!Summary':
+                summary_sheet.update_title('!Summary')
+                time.sleep(RATE_LIMIT_SLEEP)
+        except Exception as e:
+            print(f"Error renaming summary sheet: {e}")
+
+        # Dictionary to store sheet IDs
+        sheet_ids = {}
+
+        summary_data = []
+        summary_headers = ['Customer Name', 'Order Count', 'Link to Details']
+
+        for customer_name, orders in sorted(CUSTOMER_ORDERS.items()):  # Sort customers alphabetically
+            safe_name = ''.join(c for c in customer_name if c.isalnum() or c.isspace())[:31]
+
+            try:
+                try:
+                    worksheet = spreadsheet.worksheet(safe_name)
+                    worksheet.clear()
+                    time.sleep(RATE_LIMIT_SLEEP)
+                except gspread.WorksheetNotFound:
+                    worksheet = spreadsheet.add_worksheet(safe_name, 1000, 4)  # Reduced columns to 4
+                    time.sleep(RATE_LIMIT_SLEEP)
+
+                sheet_ids[safe_name] = worksheet.id
+
+                # Add summary data
+                sheet_link = f'=HYPERLINK("#gid={sheet_ids[safe_name]}", "View Details")'
+                summary_data.append([
+                    customer_name,
+                    len(orders),
+                    sheet_link
+                ])
+
+                # Format worksheet with customer header
+                format_customer_worksheet(worksheet, customer_name)
+
+                # Prepare and update data
+                data = []
+                for order in orders:
+                    for item in order['items']:
+                        preorder_status, designer, clean_name = process_item_details(item['name'])
+                        data.append([
+                            preorder_status,
+                            designer,
+                            clean_name,
+                            item['quantity']
+                        ])
+
+                if data:
+                    rate_limited_update(worksheet, data, f'A4:D{len(data)+3}')
+
+                print(f"Updated worksheet for customer: {customer_name}")
+
+            except Exception as e:
+                print(f"Error processing worksheet for {customer_name}: {e}")
+                continue
+
+        # Reorder sheets alphabetically
+        try:
+            worksheets = spreadsheet.worksheets()
+            # Sort worksheets, keeping !Summary first
+            sorted_worksheets = sorted(worksheets, key=lambda x: (x.title != '!Summary', x.title.lower()))
+
+            # Reorder sheets
+            for i, worksheet in enumerate(sorted_worksheets):
+                if worksheet.index != i:
+                    spreadsheet.reorder_worksheets([worksheet], i)
+                    time.sleep(RATE_LIMIT_SLEEP)
+        except Exception as e:
+            print(f"Error reordering sheets: {e}")
+
+        # Update !Summary sheet
+        try:
+            summary_sheet = spreadsheet.worksheet('!Summary')
+            summary_sheet.clear()
+            time.sleep(RATE_LIMIT_SLEEP)
+
+            # Update headers
+            rate_limited_update(summary_sheet, [summary_headers], 'A1:C1')
+
+            # Format headers
+            summary_sheet.format('A1:C1', {
+                "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0},
+                "textFormat": {"bold": True}
+            })
+            time.sleep(RATE_LIMIT_SLEEP)
+
+            # Update data
+            if summary_data:
+                rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED')
+
+            print(f"Updated summary sheet with {len(summary_data)} customer entries")
+
+        except Exception as e:
+            print(f"Error updating summary sheet: {e}")
+
+    except Exception as e:
+        print(f"Error saving customer orders to second spreadsheet: {e}")
         return False
 
     return True
@@ -539,8 +804,9 @@ def main():
             for item_id, item_data in ITEM_QUANTITIES.items():
                 print(f"{item_data['name']} (ID: {item_id}): {item_data['quantity']} in carts: {item_data['qty_in_carts']}")
 
-            # Save data to Google Sheets
+            # Save data to both spreadsheets
             save_preorder_data(sheets_client)
+            save_customer_orders(sheets_client)
         else:
             print("No orders found")
 
