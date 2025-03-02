@@ -646,33 +646,41 @@ def save_customer_orders(sheets_client):
     try:
         spreadsheet = sheets_client.open_by_url(SECOND_SHEET_URL)
 
-        # Rename Sheet1 to !Summary if needed
+        # Delete all existing sheets except !Summary from the second spreadsheet
         try:
-            summary_sheet = spreadsheet.sheet1
-            if summary_sheet.title != '!Summary':
-                summary_sheet.update_title('!Summary')
-                time.sleep(RATE_LIMIT_SLEEP)
+            worksheets = spreadsheet.worksheets()
+            for worksheet in worksheets:
+                if worksheet.title != '!Summary':
+                    spreadsheet.del_worksheet(worksheet)
+                    time.sleep(RATE_LIMIT_SLEEP)
         except Exception as e:
-            print(f"Error renaming summary sheet: {e}")
+            print(f"Error deleting existing sheets: {e}")
+
+        # Get or create !Summary sheet
+        try:
+            try:
+                summary_sheet = spreadsheet.worksheet('!Summary')
+                summary_sheet.clear()
+            except gspread.WorksheetNotFound:
+                summary_sheet = spreadsheet.add_worksheet('!Summary', 1000, 3)
+            time.sleep(RATE_LIMIT_SLEEP)
+        except Exception as e:
+            print(f"Error setting up summary sheet: {e}")
+            return False
 
         # Dictionary to store sheet IDs
         sheet_ids = {}
-
         summary_data = []
         summary_headers = ['Customer Name', 'Order Count', 'Link to Details']
 
-        for customer_name, orders in sorted(CUSTOMER_ORDERS.items()):  # Sort customers alphabetically
+        # Create customer sheets
+        for customer_name, orders in sorted(CUSTOMER_ORDERS.items()):
             safe_name = ''.join(c for c in customer_name if c.isalnum() or c.isspace())[:31]
 
             try:
-                try:
-                    worksheet = spreadsheet.worksheet(safe_name)
-                    worksheet.clear()
-                    time.sleep(RATE_LIMIT_SLEEP)
-                except gspread.WorksheetNotFound:
-                    worksheet = spreadsheet.add_worksheet(safe_name, 1000, 4)  # Reduced columns to 4
-                    time.sleep(RATE_LIMIT_SLEEP)
-
+                # Create new worksheet for customer
+                worksheet = spreadsheet.add_worksheet(safe_name, 1000, 4)
+                time.sleep(RATE_LIMIT_SLEEP)
                 sheet_ids[safe_name] = worksheet.id
 
                 # Add summary data
@@ -701,32 +709,18 @@ def save_customer_orders(sheets_client):
                 if data:
                     rate_limited_update(worksheet, data, f'A4:D{len(data)+3}')
 
-                print(f"Updated worksheet for customer: {customer_name}")
+                # Auto-resize all columns
+                worksheet.columns_auto_resize(0, 4)  # Resize columns A through D
+                time.sleep(RATE_LIMIT_SLEEP)
+
+                print(f"Created worksheet for customer: {customer_name}")
 
             except Exception as e:
                 print(f"Error processing worksheet for {customer_name}: {e}")
                 continue
 
-        # Reorder sheets alphabetically
-        try:
-            worksheets = spreadsheet.worksheets()
-            # Sort worksheets, keeping !Summary first
-            sorted_worksheets = sorted(worksheets, key=lambda x: (x.title != '!Summary', x.title.lower()))
-
-            # Reorder sheets
-            for i, worksheet in enumerate(sorted_worksheets):
-                if worksheet.index != i:
-                    spreadsheet.reorder_worksheets([worksheet], i)
-                    time.sleep(RATE_LIMIT_SLEEP)
-        except Exception as e:
-            print(f"Error reordering sheets: {e}")
-
         # Update !Summary sheet
         try:
-            summary_sheet = spreadsheet.worksheet('!Summary')
-            summary_sheet.clear()
-            time.sleep(RATE_LIMIT_SLEEP)
-
             # Update headers
             rate_limited_update(summary_sheet, [summary_headers], 'A1:C1')
 
@@ -740,6 +734,10 @@ def save_customer_orders(sheets_client):
             # Update data
             if summary_data:
                 rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED')
+
+            # Auto-resize summary columns
+            summary_sheet.columns_auto_resize(0, 3)  # Resize columns A through C
+            time.sleep(RATE_LIMIT_SLEEP)
 
             print(f"Updated summary sheet with {len(summary_data)} customer entries")
 
