@@ -118,6 +118,11 @@ def parse_args():
         action='store_true',
         help='Skip writing to the Customer Orders spreadsheet'
     )
+    parser.add_argument(
+        '--debug-item',
+        action='append',
+        help='Item name substring to debug (can be specified multiple times)'
+    )
     args = parser.parse_args()
 
     # Validate date format
@@ -476,12 +481,21 @@ def rate_limited_update(worksheet, values, range_name=None, value_input_option='
         print(f"Error during worksheet update: {e}")
         raise
 
-def save_preorder_data(sheets_client, skip_write=False):
+def is_debug_item(item_name, debug_items):
+    """Check if item_name contains any of the debug substrings"""
+    if not debug_items:
+        return False
+
+    item_name_lower = item_name.lower()
+    return any(debug_str.lower() in item_name_lower for debug_str in debug_items)
+
+def save_preorder_data(sheets_client, skip_write=False, debug_items=None):
     """
     Save preorder data to Google Sheets in the 'Pre-Orders' worksheet
     Args:
         sheets_client: Authorized Google Sheets client
         skip_write: If True, skip the actual write operations
+        debug_items: List of item name substrings to debug
     """
     try:
         # Load designer room numbers first
@@ -539,6 +553,22 @@ def save_preorder_data(sheets_client, skip_write=False):
         for item_id, item_data in ITEM_QUANTITIES.items():
             catalog_item = get_catalog_item(item_id)
             if catalog_item and is_market_item(catalog_item):
+                item_name = item_data['name']
+
+                # Debug output for matching items
+                if is_debug_item(item_name, debug_items):
+                    print(f"\nDebug: Found matching item in pre-orders: {item_name}")
+                    print(f"Quantity ordered: {item_data['quantity']}")
+                    # Find all orders containing this item
+                    for customer_name, orders in CUSTOMER_ORDERS.items():
+                        for order in orders:
+                            for order_item in order['items']:
+                                if item_name == order_item['name']:
+                                    print(f"  Order {order['order_id']} by {customer_name}")
+                                    print(f"  Created at: {order['created_at']}")
+                                    print(f"  Status: {order['status']}")
+                                    print(f"  Quantity: {order_item['quantity']}")
+
                 designer = extract_designer_name(item_data['name'])
                 room_number = DESIGNER_ROOM_NUMBERS.get(designer, '')  # Get room number or empty string
 
@@ -571,8 +601,9 @@ def save_preorder_data(sheets_client, skip_write=False):
 
         # Clear and update data with rate limiting
         if final_data:
-            worksheet.batch_clear(['A3:D1000'])
-            time.sleep(RATE_LIMIT_SLEEP)
+            if not skip_write:  # Only clear if we're actually writing
+                worksheet.batch_clear(['A3:D1000'])
+                time.sleep(RATE_LIMIT_SLEEP)
             rate_limited_update(worksheet, final_data, 'A3', skip_write=skip_write)
             print(f"Successfully wrote {len(data)} items to the Pre-Orders sheet")
         else:
@@ -660,12 +691,12 @@ def process_item_details(item_name):
 
     return preorder_status, designer, clean_name
 
-def save_customer_orders(sheets_client, skip_write=False):
+def save_customer_orders(sheets_client, skip_write=False, debug_items=None):
     try:
         spreadsheet = sheets_client.open_by_url(SECOND_SHEET_URL)
 
         # Delete all existing sheets except !Summary from the second spreadsheet
-        if not skip_write:
+        if not skip_write:  # Only delete sheets if we're not in skip mode
             try:
                 worksheets = spreadsheet.worksheets()
                 for worksheet in worksheets:
@@ -677,12 +708,13 @@ def save_customer_orders(sheets_client, skip_write=False):
 
         # Get or create !Summary sheet
         try:
-            try:
-                summary_sheet = spreadsheet.worksheet('!Summary')
-                summary_sheet.clear()
-            except gspread.WorksheetNotFound:
-                summary_sheet = spreadsheet.add_worksheet('!Summary', 1000, 3)
-            time.sleep(RATE_LIMIT_SLEEP)
+            if not skip_write:  # Only clear summary if we're not in skip mode
+                try:
+                    summary_sheet = spreadsheet.worksheet('!Summary')
+                    summary_sheet.clear()
+                except gspread.WorksheetNotFound:
+                    summary_sheet = spreadsheet.add_worksheet('!Summary', 1000, 3)
+                time.sleep(RATE_LIMIT_SLEEP)
         except Exception as e:
             print(f"Error setting up summary sheet: {e}")
             return False
@@ -697,26 +729,38 @@ def save_customer_orders(sheets_client, skip_write=False):
             safe_name = ''.join(c for c in customer_name if c.isalnum() or c.isspace())[:31]
 
             try:
-                # Create new worksheet for customer
-                worksheet = spreadsheet.add_worksheet(safe_name, 1000, 4)
-                time.sleep(RATE_LIMIT_SLEEP)
-                sheet_ids[safe_name] = worksheet.id
+                # Skip worksheet creation in skip mode
+                if not skip_write:
+                    # Create new worksheet for customer
+                    worksheet = spreadsheet.add_worksheet(safe_name, 1000, 4)
+                    time.sleep(RATE_LIMIT_SLEEP)
+                    sheet_ids[safe_name] = worksheet.id
 
-                # Add summary data
-                sheet_link = f'=HYPERLINK("#gid={sheet_ids[safe_name]}", "View Details")'
-                summary_data.append([
-                    customer_name,
-                    len(orders),
-                    sheet_link
-                ])
+                    # Add summary data
+                    sheet_link = f'=HYPERLINK("#gid={sheet_ids[safe_name]}", "View Details")'
+                    summary_data.append([
+                        customer_name,
+                        len(orders),
+                        sheet_link
+                    ])
 
-                # Format worksheet with customer header
-                format_customer_worksheet(worksheet, customer_name)
+                    # Format worksheet with customer header
+                    format_customer_worksheet(worksheet, customer_name)
 
-                # Prepare and update data
+                # Process data and debug output regardless of skip mode
                 data = []
                 for order in orders:
                     for item in order['items']:
+                        # Debug output for matching items
+                        if is_debug_item(item['name'], debug_items):
+                            print(f"\nDebug: Found matching item in customer order:")
+                            print(f"Customer: {customer_name}")
+                            print(f"Order ID: {order['order_id']}")
+                            print(f"Created at: {order['created_at']}")
+                            print(f"Status: {order['status']}")
+                            print(f"Item: {item['name']}")
+                            print(f"Quantity: {item['quantity']}")
+
                         preorder_status, designer, clean_name = process_item_details(item['name'])
                         data.append([
                             preorder_status,
@@ -725,43 +769,43 @@ def save_customer_orders(sheets_client, skip_write=False):
                             item['quantity']
                         ])
 
-                if data:
+                if data and not skip_write:
                     rate_limited_update(worksheet, data, f'A4:D{len(data)+3}', skip_write=skip_write)
+                    # Auto-resize all columns
+                    worksheet.columns_auto_resize(0, 4)  # Resize columns A through D
+                    time.sleep(RATE_LIMIT_SLEEP)
 
-                # Auto-resize all columns
-                worksheet.columns_auto_resize(0, 4)  # Resize columns A through D
-                time.sleep(RATE_LIMIT_SLEEP)
-
-                print(f"Created worksheet for customer: {customer_name}")
+                print(f"Processed data for customer: {customer_name}")
 
             except Exception as e:
                 print(f"Error processing worksheet for {customer_name}: {e}")
                 continue
 
-        # Update !Summary sheet
-        try:
-            # Update headers
-            rate_limited_update(summary_sheet, [summary_headers], 'A1:C1', skip_write=skip_write)
+        # Update !Summary sheet only if not in skip mode
+        if not skip_write:
+            try:
+                # Update headers
+                rate_limited_update(summary_sheet, [summary_headers], 'A1:C1', skip_write=skip_write)
 
-            # Format headers
-            summary_sheet.format('A1:C1', {
-                "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0},
-                "textFormat": {"bold": True}
-            }, skip_write=skip_write)
-            time.sleep(RATE_LIMIT_SLEEP)
+                # Format headers
+                summary_sheet.format('A1:C1', {
+                    "backgroundColor": {"red": 0.8, "green": 0.9, "blue": 1.0},
+                    "textFormat": {"bold": True}
+                })
+                time.sleep(RATE_LIMIT_SLEEP)
 
-            # Update data
-            if summary_data:
-                rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED', skip_write=skip_write)
+                # Update data
+                if summary_data:
+                    rate_limited_update(summary_sheet, summary_data, f'A2:C{len(summary_data)+1}', value_input_option='USER_ENTERED', skip_write=skip_write)
 
-            # Auto-resize summary columns
-            summary_sheet.columns_auto_resize(0, 3)  # Resize columns A through C
-            time.sleep(RATE_LIMIT_SLEEP)
+                # Auto-resize summary columns
+                summary_sheet.columns_auto_resize(0, 3)  # Resize columns A through C
+                time.sleep(RATE_LIMIT_SLEEP)
 
-            print(f"Updated summary sheet with {len(summary_data)} customer entries")
+                print(f"Updated summary sheet with {len(summary_data)} customer entries")
 
-        except Exception as e:
-            print(f"Error updating summary sheet: {e}")
+            except Exception as e:
+                print(f"Error updating summary sheet: {e}")
 
     except Exception as e:
         print(f"Error saving customer orders to second spreadsheet: {e}")
@@ -821,9 +865,9 @@ def main():
             for item_id, item_data in ITEM_QUANTITIES.items():
                 print(f"{item_data['name']} (ID: {item_id}): {item_data['quantity']} in carts: {item_data['qty_in_carts']}")
 
-            # Save data to both spreadsheets with skip flags
-            save_preorder_data(sheets_client, args.skip_preorders)
-            save_customer_orders(sheets_client, args.skip_customer_orders)
+            # Save data to both spreadsheets with skip flags and debug items
+            save_preorder_data(sheets_client, args.skip_preorders, args.debug_item)
+            save_customer_orders(sheets_client, args.skip_customer_orders, args.debug_item)
         else:
             print("No orders found")
 
