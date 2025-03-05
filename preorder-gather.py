@@ -739,13 +739,61 @@ def save_customer_orders(sheets_client, skip_write=False, debug_items=None):
             print(f"Error setting up summary sheet: {e}")
             return False
 
+        # Merge customer orders where one name is a substring of another
+        merged_customers = {}
+        customer_names = list(CUSTOMER_ORDERS.keys())
+
+        # First pass: identify which customers should be merged
+        for i, name1 in enumerate(customer_names):
+            if name1 in merged_customers:
+                continue  # Skip if already merged
+
+            for name2 in customer_names[i+1:]:
+                if name2 in merged_customers:
+                    continue  # Skip if already merged
+
+                # Check if one name is a substring of the other
+                if name1 in name2 or name2 in name1:
+                    # Use the longer name as the canonical name
+                    canonical_name = name1 if len(name1) >= len(name2) else name2
+
+                    if canonical_name not in merged_customers:
+                        merged_customers[canonical_name] = []
+
+                    # Add both names to the merged list
+                    if name1 not in merged_customers[canonical_name]:
+                        merged_customers[canonical_name].append(name1)
+                    if name2 not in merged_customers[canonical_name]:
+                        merged_customers[canonical_name].append(name2)
+
+                    print(f"!! MERGED CUSTOMERS {name1} and {name2} -> {canonical_name}")
+
+        # Second pass: create merged customer orders dictionary
+        merged_orders = {}
+        for customer_name, orders in CUSTOMER_ORDERS.items():
+            # Check if this customer should be merged
+            merged_into = None
+            for canonical_name, merged_list in merged_customers.items():
+                if customer_name in merged_list:
+                    merged_into = canonical_name
+                    break
+
+            # If customer should be merged, add orders to canonical name
+            if merged_into:
+                if merged_into not in merged_orders:
+                    merged_orders[merged_into] = []
+                merged_orders[merged_into].extend(orders)
+            else:
+                # Customer not merged, keep original
+                merged_orders[customer_name] = orders
+
         # Dictionary to store sheet IDs
         sheet_ids = {}
         summary_data = []
         summary_headers = ['Customer Name', 'Order Count', 'Link to Details']
 
         # Create customer sheets
-        for customer_name, orders in sorted(CUSTOMER_ORDERS.items()):
+        for customer_name, orders in sorted(merged_orders.items()):
             safe_name = ''.join(c for c in customer_name if c.isalnum() or c.isspace())[:31]
 
             try:
