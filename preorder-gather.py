@@ -58,7 +58,11 @@ CUSTOMER_ORDERS = {}  # Will store {customer_name: [list of order details]}
 SECOND_SHEET_URL = "https://docs.google.com/spreadsheets/d/1hhXCfphftezK_W1NYXeyFtYJgY8g9taITaQ0yUiTBx0/edit?gid=0#gid=0"
 
 # Add near the top with other globals
-RATE_LIMIT_SLEEP = 1  # Sleep duration in seconds between API calls
+COMPLETED_ORDER_NAME = "Scott Wagner"  # Name whose orders should be treated as completed
+DO_NOT_PROCESS_ORDER_IDS = ["WSFVqjYiFrqhAhemUkibkGP5YvBZY", "OO59PA9nVbYnK5xjnE5EJor3GFSZY"]
+
+# Add near the top with other globals
+RATE_LIMIT_SLEEP = 0.2  # Sleep duration in seconds between API calls
 
 def setup_google_sheets():
     # Define the scope for Google Sheets API
@@ -323,30 +327,33 @@ def process_order(order, sheets_client):
             print(f"Skipping order {order.get_order_id()}: No fulfillment information")
             return False
 
-        if order.is_still_shopping():
+        customer_info = order.get_customer_info()
+        customer_name = customer_info['name']
+
+        if order.get_order_id() in DO_NOT_PROCESS_ORDER_IDS:
+            print(f"Skipping order {order.get_order_id()}: Do not process")
+            return False
+
+        # Special handling for completed order name
+        process_order_anyway = customer_name == COMPLETED_ORDER_NAME
+        if not process_order_anyway and order.is_still_shopping():
             ORDER_STATUS_COUNTS['STILL_SHOPPING'] += 1
             print(f"Skipping order {order.get_order_id()}: Still Shopping ({order.get_amount_due()} in cart)")
             return False
 
         # Update status counts and process line items only for open orders
-        if order.is_completed_or_picked_up():
+        if not process_order_anyway and order.is_completed_or_picked_up():
             status = order.get_fulfillment_status()
             ORDER_STATUS_COUNTS[status] += 1
             print(f"Skipping order {order.get_order_id()}: Already {status}")
             return False
 
-        if order.is_cancelled():
+        if not process_order_anyway and order.is_cancelled():
             ORDER_STATUS_COUNTS['CANCELED'] += 1
             print(f"Skipping order {order.get_order_id()}: Already CANCELED")
             return False
 
         ORDER_STATUS_COUNTS['NOT_FULFILLED'] += 1
-
-        customer_info = order.get_customer_info()
-        customer_name = customer_info['name']
-
-        if customer_name == 'N/A':
-            return False
 
         if customer_name not in CUSTOMER_ORDERS:
             CUSTOMER_ORDERS[customer_name] = []
