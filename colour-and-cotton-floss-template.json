@@ -1,0 +1,75 @@
+{
+  "idempotency_key": "${idempotencyKey}",
+  "object": {
+    "type": "ITEM",
+    "id": "#${id}${idempotencyKey}",
+    "version": ${currentTimestamp},
+    "is_deleted": false,
+    "present_at_all_locations": true,
+    "item_data": {
+      "name": "${flossName}",
+      "is_taxable": true,
+      "tax_ids": [
+        "WMOGR7SLXNPNS5CIPQTWB3RM"
+      ],
+      "description_html": "",
+      "variations": [
+        {
+          "type": "ITEM_VARIATION",
+          "id": "#${id}",
+          "version": ${currentTimestamp},
+          "is_deleted": false,
+          "present_at_all_locations": true,
+          "item_variation_data": {
+            "item_id": "#${id}${idempotencyKey}",
+            "name": "Regular",
+            "sku": "${sku}",
+            "ordinal": 1,
+            "pricing_type": "FIXED_PRICING",
+            "price_money": {
+              "amount": 330,
+              "currency": "USD"
+            },
+            "location_overrides": [
+              {
+                "location_id": "L0ZE9C5Y6J1B9",
+                "track_inventory": true,
+                "inventory_alert_type": "LOW_QUANTITY",
+                "inventory_alert_threshold": 1
+              }
+            ],
+            "track_inventory": true,
+            "inventory_alert_type": "NONE",
+            "sellable": true,
+            "stockable": true,
+            "channels": [
+              "CH_HJlxIyZX9ICm8PY6ExFLQiTYwvZrJ4wOrSufYRlQuYC"
+            ]
+          }
+        }
+      ],
+      "product_type": "REGULAR",
+      "skip_modifier_screen": false,
+      "categories": [
+        {
+          "id": "R6WKCIISFIJWPSM4C6M23TLZ",
+          "ordinal": ${randomNumber}
+        },
+        {
+          "id": "3DGPLZHMSP6KEBFYPTDVKIM6",
+          "ordinal": ${randomNumber}
+        }
+      ],
+      "pickup_fulfillment_preferences_id": "fprefs_12860hn3cg5i0g5e1xzb1hfri",
+      "channels": [
+        "CH_HJlxIyZX9ICm8PY6ExFLQiTYwvZrJ4wOrSufYRlQuYC"
+      ],
+      "shipping_fulfillment_preferences_id": "fprefs_1284r0zmffe8ldfxxyqw99elw",
+      "is_archived": false,
+      "reporting_category": {
+        "id": "R6WKCIISFIJWPSM4C6M23TLZ",
+        "ordinal": -2251662374748159
+      }
+    }
+  }
+}

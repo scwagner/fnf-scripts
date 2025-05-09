@@ -3,4 +3,9 @@
 .env
 log.txt
 get-catalog/items/
+colour-and-cotton/
+gentle-art/
+Images/
+*.log
+*.csv
 
